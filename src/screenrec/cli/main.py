@@ -2,9 +2,16 @@
 
 import argparse
 import sys
+import threading
 from collections.abc import Sequence
+from contextlib import suppress
+from datetime import datetime
+from pathlib import Path
 
 from screenrec import __version__
+from screenrec.capture import FullscreenSource
+from screenrec.encoder import FfmpegFrameEncoder
+from screenrec.session import DefaultRecordingSession
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,7 +24,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+    parser.add_argument(
+        "--monitor",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Monitor number to record (default: 1)",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        metavar="S",
+        help="Record for S seconds, then stop gracefully and finalize the MP4",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        choices=range(1, 61),
+        metavar="F",
+        help="Frame rate, 1-60 (default: 30)",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output MP4 path (default: ./recordings/rec-YYYYMMDD-HHMMSS.mp4)",
+    )
     return parser
+
+
+def default_output_path() -> Path:
+    name = datetime.now().strftime("rec-%Y%m%d-%H%M%S.mp4")
+    return Path("recordings") / name
+
+
+def _stop_on_enter(session: DefaultRecordingSession) -> None:
+    """Stop the session when the user presses Enter on stdin."""
+    # stdin may be non-interactive: EOF, a closed pipe, or a captured test runner.
+    with suppress(OSError, ValueError):
+        for _ in sys.stdin:
+            session.request_stop()
+            break
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -27,5 +74,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not argv:
         parser.print_help()
         return 0
-    parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if args.duration is not None and args.duration <= 0:
+        parser.error("--duration must be greater than 0")
+
+    try:
+        source = FullscreenSource(args.monitor)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    output = Path(args.output) if args.output else default_output_path()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    encoder = FfmpegFrameEncoder(source.width, source.height, args.fps, str(output))
+    session = DefaultRecordingSession(source, encoder, args.fps, args.duration)
+
+    threading.Thread(target=_stop_on_enter, args=(session,), daemon=True).start()
+
+    session.start()
+    try:
+        session.run()
+    except KeyboardInterrupt:
+        pass  # Ctrl-C is a graceful stop trigger
+    finally:
+        session.stop()
+
+    if session.error is not None:
+        print(f"error: {session.error}", file=sys.stderr)
+        return 1
+    print(output)
     return 0
