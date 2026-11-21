@@ -93,8 +93,6 @@ class DefaultRecordingSession(RecordingSession):
             self._timer.cancel()
         self._capture_thread.join()
         self._writer_thread.join()
-        self._capture_thread.join()
-        self._writer_thread.join()
         if self._error is not None:
             # Fatal stop: the partial output is retained unfinalized (GLOSSARY).
             return

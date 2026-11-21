@@ -143,6 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if session.error is not None:
         print(f"error: {session.error}", file=sys.stderr)
+        print(f"partial output retained: {output}", file=sys.stderr)
         return 1
     print(output)
     return 0
