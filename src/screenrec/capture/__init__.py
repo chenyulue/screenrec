@@ -11,7 +11,20 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import mss
+from mss.base import MSS
 
+from screenrec.capture.cursor import CursorAnnotator
+
+
+def _open_mss(cursor_highlight: bool) -> MSS:
+    """Open an mss instance with cursor compositing where the platform supports it.
+
+    ``with_cursor`` is a Linux-only mss feature; passing it on other
+    platforms raises a DeprecationWarning from mss.
+    """
+    if sys.platform == "linux":
+        return mss.mss(with_cursor=cursor_highlight)
+    return mss.mss()
 
 class WindowSource(ABC):
     """A source of raw screen frames for the recording pipeline."""
@@ -25,8 +38,8 @@ class WindowSource(ABC):
 class FullscreenSource(WindowSource):
     """mss-backed fullscreen capture for a single monitor (raw BGRA frames)."""
 
-    def __init__(self, monitor: int = 1) -> None:
-        self._sct = mss.mss()
+    def __init__(self, monitor: int = 1, cursor_highlight: bool = True) -> None:
+        self._sct = _open_mss(cursor_highlight)
         monitors = self._sct.monitors
         # mss reserves index 0 for the virtual full-screen dummy entry.
         if not 1 <= monitor < len(monitors):
@@ -34,6 +47,14 @@ class FullscreenSource(WindowSource):
                 f"monitor {monitor} is out of range: 1..{len(monitors) - 1}"
             )
         self._monitor = monitors[monitor]
+        self._annotator = CursorAnnotator(
+            self._monitor["width"],
+            self._monitor["height"],
+            self._monitor["left"],
+            self._monitor["top"],
+            enabled=cursor_highlight,
+        )
+
 
     @property
     def width(self) -> int:
@@ -44,7 +65,10 @@ class FullscreenSource(WindowSource):
         return self._monitor["height"]
 
     def grab(self) -> bytes:
-        return self._sct.grab(self._monitor).bgra
+        shot = self._sct.grab(self._monitor)
+        # Annotate the reused mss buffer in place, then hand the session a
+        # private copy.
+        return bytes(self._annotator.annotate(shot.raw))
 
 
 @dataclass(frozen=True)
@@ -68,8 +92,8 @@ class WindowMatch:
 class RegionSource(WindowSource):
     """mss-backed capture of an arbitrary rectangular region (raw BGRA frames)."""
 
-    def __init__(self, rect: WindowRect) -> None:
-        self._sct = mss.mss()
+    def __init__(self, rect: WindowRect, cursor_highlight: bool = True) -> None:
+        self._sct = _open_mss(cursor_highlight)
         if rect.width <= 0 or rect.height <= 0:
             raise ValueError(
                 f"invalid region {rect.left},{rect.top},{rect.width},{rect.height}: "
@@ -92,6 +116,10 @@ class RegionSource(WindowSource):
             "width": rect.width,
             "height": rect.height,
         }
+        self._annotator = CursorAnnotator(
+            rect.width, rect.height, rect.left, rect.top, enabled=cursor_highlight
+        )
+
 
     @property
     def width(self) -> int:
@@ -102,7 +130,8 @@ class RegionSource(WindowSource):
         return self._rect["height"]
 
     def grab(self) -> bytes:
-        return self._sct.grab(self._rect).bgra
+        shot = self._sct.grab(self._rect)
+        return bytes(self._annotator.annotate(shot.raw))
 
 
 def find_window(title_substring: str) -> WindowMatch:

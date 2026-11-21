@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TITLE",
         help="Record the window whose title contains TITLE (region-grab semantics)",
     )
+    parser.add_argument(
+        "--cursor-highlight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include the mouse cursor with a light-yellow highlight (default: on)",
+    )
+
     return parser
 
 
@@ -105,7 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.region is not None:
         try:
-            source = RegionSource(args.region)
+            source = RegionSource(args.region, cursor_highlight=args.cursor_highlight)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -117,10 +124,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         if match.warning:
             print(f"warning: {match.warning}", file=sys.stderr)
-        source = RegionSource(match.rect)
+        source = RegionSource(match.rect, cursor_highlight=args.cursor_highlight)
     else:
         try:
-            source = FullscreenSource(args.monitor)
+            source = FullscreenSource(args.monitor, cursor_highlight=args.cursor_highlight)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
