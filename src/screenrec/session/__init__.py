@@ -2,7 +2,7 @@
 
 Owns the recording session lifecycle — start, frame pacing, stop, and the
 failure policy — coordinating the capture and encoder modules without
-owning either of them.
+owning either of them, and pulling audio from the reserved audio abstraction.
 """
 
 import queue
@@ -10,6 +10,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
+from screenrec.audio import AudioSource, NoopAudioSource
 from screenrec.capture import WindowSource
 from screenrec.encoder import FrameEncoder
 
@@ -41,11 +42,15 @@ class DefaultRecordingSession(RecordingSession):
         encoder: FrameEncoder,
         fps: int,
         duration: float | None = None,
+        audio: AudioSource | None = None,
     ) -> None:
         self._source = source
         self._encoder = encoder
         self._fps = fps
         self._duration = duration
+        # v1 is video-only: the session depends on the audio abstraction and
+        # defaults to the no-op stub.
+        self._audio = audio if audio is not None else NoopAudioSource()
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self.QUEUE_SIZE)
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -152,5 +157,10 @@ class DefaultRecordingSession(RecordingSession):
                 except queue.Empty:
                     continue
                 self._encoder.push(frame)
+                # Audio data seam: pull one audio sample per frame. v1's
+                # no-op stub returns None and recordings stay pure video; a
+                # real audio source feeds the audio path from this exact
+                # point, without restructuring the session.
+                self._audio.sample()
         except Exception as exc:
             self._fail(exc)
