@@ -19,9 +19,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install Xvfb (Linux)
+      - name: Install Xvfb and GUI libs (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1 libglib2.0-0
 
       - name: Sync dependencies
         run: uv sync --frozen

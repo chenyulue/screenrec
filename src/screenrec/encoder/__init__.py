@@ -67,3 +67,19 @@ class FfmpegFrameEncoder(FrameEncoder):
         if code != 0:
             detail = stderr.decode(errors="replace").strip()
             raise EncoderError(f"ffmpeg exited with code {code}: {detail}")
+
+
+class NoopFrameEncoder(FrameEncoder):
+    """A FrameEncoder that discards every frame and finalizes trivially.
+
+    Used by preview-only mode, which shows the capture live without writing
+    a video file (ticket 07).
+    """
+
+    def push(self, frame: bytes) -> None:
+        """Discard the frame; nothing is written."""
+        return
+
+    def finalize(self) -> None:
+        """No output to finalize."""
+        return

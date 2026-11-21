@@ -9,10 +9,12 @@ import queue
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import suppress
 
 from screenrec.audio import AudioSource, NoopAudioSource
 from screenrec.capture import WindowSource
 from screenrec.encoder import FrameEncoder
+from screenrec.preview import Preview
 
 
 class RecordingSession(ABC):
@@ -43,6 +45,7 @@ class DefaultRecordingSession(RecordingSession):
         fps: int,
         duration: float | None = None,
         audio: AudioSource | None = None,
+        preview: Preview | None = None,
     ) -> None:
         self._source = source
         self._encoder = encoder
@@ -51,7 +54,9 @@ class DefaultRecordingSession(RecordingSession):
         # v1 is video-only: the session depends on the audio abstraction and
         # defaults to the no-op stub.
         self._audio = audio if audio is not None else NoopAudioSource()
+        self._preview = preview
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self.QUEUE_SIZE)
+        self._preview_queue: queue.Queue[bytes] = queue.Queue(maxsize=self.QUEUE_SIZE)
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._error: Exception | None = None
@@ -82,10 +87,18 @@ class DefaultRecordingSession(RecordingSession):
         self._stop_event.set()
 
     def run(self) -> None:
-        """Block until stop is requested, then perform the graceful stop."""
+        """Block until stop is requested, then perform the graceful stop.
+
+        With a preview, the main thread drives the display loop — OpenCV's
+        GUI functions (imshow/waitKey) must run on the main thread — so it
+        cannot simply wait on the stop signal.
+        """
         if not self._started:
             self.start()
-        self._stop_event.wait()
+        if self._preview is not None:
+            self._preview_loop()
+        else:
+            self._stop_event.wait()
         self.stop()
     def stop(self) -> None:
         """Stop gracefully: halt capture, drain queued frames, finalize output."""
@@ -98,6 +111,8 @@ class DefaultRecordingSession(RecordingSession):
             self._timer.cancel()
         self._capture_thread.join()
         self._writer_thread.join()
+        if self._preview is not None:
+            self._preview.close()
         if self._error is not None:
             # Fatal stop: the partial output is retained unfinalized (GLOSSARY).
             return
@@ -124,6 +139,8 @@ class DefaultRecordingSession(RecordingSession):
         try:
             while not self._stop_event.is_set():
                 frame = self._source.grab()
+                if self._preview is not None:
+                    self._dispatch_preview(frame)
                 if self._enqueue(frame) or self._stop_event.is_set():
                     break
                 next_tick += interval
@@ -134,6 +151,33 @@ class DefaultRecordingSession(RecordingSession):
                     next_tick = time.monotonic()  # fell behind: resync, no busy-wait
         except Exception as exc:
             self._fail(exc)
+
+    def _preview_loop(self) -> None:
+        """Drive the preview display on the main thread.
+
+        OpenCV's GUI functions (imshow/waitKey) must run on the main thread,
+        so the display is pumped here rather than in the capture thread.
+        """
+        preview = self._preview
+        if preview is None:
+            return
+        while not self._stop_event.is_set():
+            try:
+                frame = self._preview_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            preview.show(frame)
+            if preview.quit_requested():
+                self.request_stop()
+
+    def _dispatch_preview(self, frame: bytes) -> None:
+        """Hand a frame to the preview display without blocking capture.
+
+        If the display falls behind, the frame is dropped — the preview is
+        best-effort real-time and never stalls capture.
+        """
+        with suppress(queue.Full):
+            self._preview_queue.put_nowait(frame)
 
     def _enqueue(self, frame: bytes) -> bool:
         """Enqueue a frame, blocking while the writer falls behind.

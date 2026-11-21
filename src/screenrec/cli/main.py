@@ -10,7 +10,8 @@ from pathlib import Path
 
 from screenrec import __version__
 from screenrec.capture import FullscreenSource, RegionSource, WindowRect, find_window
-from screenrec.encoder import FfmpegFrameEncoder
+from screenrec.encoder import FfmpegFrameEncoder, NoopFrameEncoder
+from screenrec.preview import OpenCvPreview
 from screenrec.session import DefaultRecordingSession
 
 
@@ -67,6 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Include the mouse cursor with a light-yellow highlight (default: on)",
+    )
+    parser.add_argument(
+        "--preview",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show a live preview window during recording (default: off)",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Show the capture live in a preview window without writing a video file",
     )
 
     return parser
@@ -132,11 +144,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-    output = Path(args.output) if args.output else default_output_path()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    preview_on = args.preview or args.preview_only
 
-    encoder = FfmpegFrameEncoder(source.width, source.height, args.fps, str(output))
-    session = DefaultRecordingSession(source, encoder, args.fps, args.duration)
+    output: Path | None = None
+    if not args.preview_only:
+        output = Path(args.output) if args.output else default_output_path()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        encoder = FfmpegFrameEncoder(source.width, source.height, args.fps, str(output))
+    else:
+        encoder = NoopFrameEncoder()
+
+    preview = OpenCvPreview(source.width, source.height) if preview_on else None
+    session = DefaultRecordingSession(
+        source, encoder, args.fps, args.duration, preview=preview
+    )
 
     threading.Thread(target=_stop_on_enter, args=(session,), daemon=True).start()
 
@@ -150,7 +171,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if session.error is not None:
         print(f"error: {session.error}", file=sys.stderr)
-        print(f"partial output retained: {output}", file=sys.stderr)
+        if output is not None:
+            print(f"partial output retained: {output}", file=sys.stderr)
         return 1
-    print(output)
+    if output is not None:
+        print(output)
     return 0

@@ -7,6 +7,8 @@ requires-python = ">=3.14"
 dependencies = [
     "imageio-ffmpeg>=0.8.1",
     "mss>=10.2.0",
+    "numpy>=2.5.5",
+    "opencv-python>=5.1.0.95",
     "pygetwindow>=0.0.9; sys_platform == 'win32'",
     "pywin32>=0.300; sys_platform == 'win32'",
 ]
