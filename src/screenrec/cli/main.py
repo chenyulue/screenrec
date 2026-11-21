@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from screenrec import __version__
-from screenrec.capture import FullscreenSource
+from screenrec.capture import FullscreenSource, RegionSource, WindowRect, find_window
 from screenrec.encoder import FfmpegFrameEncoder
 from screenrec.session import DefaultRecordingSession
 
@@ -23,13 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
-    )
-    parser.add_argument(
-        "--monitor",
-        type=int,
-        default=1,
-        metavar="N",
-        help="Monitor number to record (default: 1)",
     )
     parser.add_argument(
         "--duration",
@@ -50,7 +43,38 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Output MP4 path (default: ./recordings/rec-YYYYMMDD-HHMMSS.mp4)",
     )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--monitor",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Monitor number to record (default: 1)",
+    )
+    selection.add_argument(
+        "--region",
+        type=_region_arg,
+        metavar="x,y,w,h",
+        help="Record a rectangular region of the screen at x,y with size w,h",
+    )
+    selection.add_argument(
+        "--window",
+        metavar="TITLE",
+        help="Record the window whose title contains TITLE (region-grab semantics)",
+    )
     return parser
+
+
+def _region_arg(value: str) -> WindowRect:
+    """Parse --region x,y,w,h into a WindowRect."""
+    parts = value.split(",")
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("expected x,y,w,h")
+    try:
+        left, top, width, height = map(int, parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected integers, got {value!r}") from None
+    return WindowRect(left, top, width, height)
 
 
 def default_output_path() -> Path:
@@ -79,11 +103,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.duration is not None and args.duration <= 0:
         parser.error("--duration must be greater than 0")
 
-    try:
-        source = FullscreenSource(args.monitor)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    if args.region is not None:
+        try:
+            source = RegionSource(args.region)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    elif args.window is not None:
+        try:
+            match = find_window(args.window)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if match.warning:
+            print(f"warning: {match.warning}", file=sys.stderr)
+        source = RegionSource(match.rect)
+    else:
+        try:
+            source = FullscreenSource(args.monitor)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     output = Path(args.output) if args.output else default_output_path()
     output.parent.mkdir(parents=True, exist_ok=True)
