@@ -12,6 +12,8 @@ from contextlib import suppress
 import cv2
 import numpy as np
 
+from screenrec.capture import WindowRect
+
 
 class Preview(ABC):
     """A live display of capture frames, and the q-to-quit detection seam."""
@@ -27,6 +29,11 @@ class Preview(ABC):
         ...
 
     @abstractmethod
+    def window_rect(self) -> WindowRect | None:
+        """The preview window's rectangle on the virtual screen, or None."""
+        ...
+
+    @abstractmethod
     def close(self) -> None:
         """Close the preview window."""
         ...
@@ -37,27 +44,52 @@ class OpenCvPreview(Preview):
 
     The window size follows the capture region (``width`` x ``height``). Each
     shown frame is the same raw BGRA frame the encoder receives; it is
-    converted to BGR for display only.
+    converted to BGR for display only. ``window_rect()`` reports the window's
+    position so the capture source can exclude it from the frames.
     """
 
     WINDOW_NAME = "screenrec preview"
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(
+        self, width: int, height: int, position: tuple[int, int] | None = None
+    ) -> None:
         self._width = width
         self._height = height
         self._quit = False
+        self._rect: WindowRect | None = None
         cv2.namedWindow(self.WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.WINDOW_NAME, width, height)
+        if position is not None:
+            cv2.moveWindow(self.WINDOW_NAME, position[0], position[1])
+        self._update_rect()
 
     def show(self, frame: bytes) -> None:
         bgra = np.frombuffer(frame, dtype=np.uint8).reshape(self._height, self._width, 4)
         bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
         cv2.imshow(self.WINDOW_NAME, bgr)
+        self._update_rect()
         if (cv2.waitKey(1) & 0xFF) == ord("q"):
             self._quit = True
 
     def quit_requested(self) -> bool:
         return self._quit
+
+    def _update_rect(self) -> None:
+        """Cache the window's rect on the virtual screen.
+
+        getWindowImageRect is a GUI call, so it only ever runs on the main
+        thread (from __init__ and show()), never from the capture thread.
+        """
+        try:
+            x, y, width, height = cv2.getWindowImageRect(self.WINDOW_NAME)
+        except cv2.error:
+            return
+        if width > 0 and height > 0:
+            self._rect = WindowRect(x, y, width, height)
+
+    def window_rect(self) -> WindowRect | None:
+        """The preview window's rectangle on the virtual screen, if known."""
+        return self._rect
 
     def close(self) -> None:
         # Tear down only this window, not every OpenCV window in the process.

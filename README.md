@@ -13,8 +13,8 @@ uv sync
 ## Usage
 
 ```sh
-screenrec --help
-screenrec --version
+uv run screenrec --help
+uv run screenrec --version
 ```
 
 Common options:
@@ -28,7 +28,7 @@ A recording runs until `--duration` elapses, or until you stop it with **Ctrl-C*
 ### Fullscreen capture
 
 ```sh
-screenrec --monitor 1 --duration 30
+uv run screenrec --monitor 1 --duration 30
 ```
 
 Records the entire visible screen of monitor `N` (default: 1). This is the default capture mode when no `--region` or `--window` is given. An out-of-range monitor number fails at startup with a clear error and a non-zero exit code.
@@ -36,7 +36,7 @@ Records the entire visible screen of monitor `N` (default: 1). This is the defau
 ### Region capture
 
 ```sh
-screenrec --region x,y,w,h --duration 30
+uv run screenrec --region x,y,w,h --duration 30
 ```
 
 Records the rectangular region of the screen at `(x, y)` with size `w` by `h`.
@@ -46,11 +46,15 @@ startup with a clear error and a non-zero exit code.
 ### Window capture
 
 ```sh
+screenrec --list-windows
 screenrec --window "terminal" --duration 30
 ```
 
 Records the first window whose title contains the given substring; when several
-windows match, the first match is used and a warning is printed.
+windows match, the first match is used and a warning is printed. If you don't
+know the window titles, run `screenrec --list-windows` first to enumerate every
+top-level window's title and bounding rect, then pick a substring for
+`--window`.
 
 Window capture uses **region-grab semantics**: the window's bounding rectangle
 is resolved at session start and the visible on-screen content within that
@@ -69,8 +73,8 @@ cursor is outside the captured area.
 ### Preview window
 
 ```sh
-screenrec --preview --duration 30
-screenrec --preview-only
+uv run screenrec --preview --duration 30
+uv run screenrec --preview-only
 ```
 
 `--preview` shows a live preview window of the frames being recorded, alongside
@@ -79,7 +83,10 @@ recordings never open a window). `--preview-only` shows the capture live in the
 preview window without writing a video file. Press **q** in the preview window
 to stop the recording gracefully, finalizing the MP4 the same as Ctrl-C. The
 preview window requires a display server — a real display on Windows, Xvfb on
-Linux.
+Linux. On a multi-monitor setup the preview window is moved automatically to a
+spare monitor the capture does not touch; when there is no spare monitor it
+stays on the captured screen and is painted out of every frame, so it never
+appears in the recording or inside the preview itself.
 
 ## Development
 

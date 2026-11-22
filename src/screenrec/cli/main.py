@@ -9,7 +9,13 @@ from datetime import datetime
 from pathlib import Path
 
 from screenrec import __version__
-from screenrec.capture import FullscreenSource, RegionSource, WindowRect, find_window
+from screenrec.capture import (
+    FullscreenSource,
+    RegionSource,
+    WindowRect,
+    find_window,
+    list_windows,
+)
 from screenrec.encoder import FfmpegFrameEncoder, NoopFrameEncoder
 from screenrec.preview import OpenCvPreview
 from screenrec.session import DefaultRecordingSession
@@ -62,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--window",
         metavar="TITLE",
         help="Record the window whose title contains TITLE (region-grab semantics)",
+    )
+    parser.add_argument(
+        "--list-windows",
+        action="store_true",
+        help="List all window titles, then exit (pick a --window TITLE from the list)",
     )
     parser.add_argument(
         "--cursor-highlight",
@@ -121,6 +132,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.duration is not None and args.duration <= 0:
         parser.error("--duration must be greater than 0")
+    if args.list_windows:
+        try:
+            windows = list_windows()
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for title, rect in windows:
+            print(f"{title}\t{rect.left},{rect.top},{rect.width},{rect.height}")
+        return 0
 
     if args.region is not None:
         try:
@@ -154,7 +174,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         encoder = NoopFrameEncoder()
 
-    preview = OpenCvPreview(source.width, source.height) if preview_on else None
+    preview = (
+        OpenCvPreview(source.width, source.height, source.preview_position())
+        if preview_on
+        else None
+    )
     session = DefaultRecordingSession(
         source, encoder, args.fps, args.duration, preview=preview
     )

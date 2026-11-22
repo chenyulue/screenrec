@@ -75,6 +75,11 @@ class DefaultRecordingSession(RecordingSession):
             if self._started:
                 raise RuntimeError("session is already started")
             self._started = True
+        if self._preview is not None:
+            # Exclude the preview window from capture: it sits on the screen
+            # being captured and would otherwise appear inside its own
+            # frames, a recursive preview.
+            self._source.exclude = self._preview.window_rect
         self._capture_thread.start()
         self._writer_thread.start()
         if self._duration is not None:

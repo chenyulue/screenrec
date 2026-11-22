@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from screenrec.cli.main import build_parser
+
 
 def run_screenrec(*args: str, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     screenrec = shutil.which("screenrec")
@@ -133,6 +135,22 @@ def test_nonexistent_window_fails_with_clear_error(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "window" in result.stderr.lower()
+
+
+def test_list_windows_flag_is_parsed() -> None:
+    args = build_parser().parse_args(["--list-windows"])
+    assert args.list_windows is True
+
+
+def test_list_windows_shows_open_window_titles(tmp_path: Path) -> None:
+    """--list-windows lists window titles (with rects) and exits without recording."""
+    helper = _start_window_helper(1)
+    try:
+        result = run_screenrec("--list-windows", cwd=tmp_path)
+    finally:
+        helper.terminate()
+    assert result.returncode == 0, result.stderr
+    assert WINDOW_TITLE in result.stdout
 
 
 @needs_ffprobe

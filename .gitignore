@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 wheels/
+recordings/*.mp4
 *.egg-info
 
 # Virtual environments

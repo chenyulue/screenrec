@@ -1,12 +1,14 @@
 """Seam tests for the live preview window (ticket 07).
 
-Two seams are exercised:
+Three seams are exercised:
 - The ``screenrec`` console entry point, driven as a real subprocess, for the
   external behavior: ``--preview`` records a valid MP4 without breaking the
   recording flow, and ``--preview-only`` shows the capture without writing a
   file.
 - ``DefaultRecordingSession`` itself, with a fake preview injected, for the
   q-to-quit graceful-stop logic (no platform display needed).
+- The capture sources' preview-window exclusion (no display needed): the
+  preview window's rect must be painted out of every grabbed frame.
 """
 
 import os
@@ -14,10 +16,18 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import cast
 
 import pytest
+from mss.base import MSS
 
-from screenrec.capture import WindowSource
+from screenrec.capture import (
+    PREVIEW_MARGIN,
+    FullscreenSource,
+    RegionSource,
+    WindowRect,
+    WindowSource,
+)
 from screenrec.cli.main import build_parser
 from screenrec.encoder import FrameEncoder
 from screenrec.preview import Preview
@@ -87,6 +97,10 @@ class _FakePreview(Preview):
     def quit_requested(self) -> bool:
         return self._quit
 
+    def window_rect(self) -> WindowRect | None:
+        """The fake has no real window, so there is nothing to exclude."""
+        return None
+
     def close(self) -> None:
         self.closed = True
 
@@ -124,6 +138,124 @@ def test_no_preview_does_not_touch_display() -> None:
 
     assert session.error is None
     assert encoder.finalized
+
+
+# --------------------------------------------------------------------------- #
+# Preview-window exclusion tests (capture must never see the preview itself)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSct:
+    """Stands in for the mss instance: fixed monitors and a fixed shot."""
+
+    def __init__(
+        self, raw: bytearray | None = None, monitors: list[dict] | None = None
+    ) -> None:
+        self._raw = raw if raw is not None else bytearray(b"\x00" * 16)
+        self.monitors = monitors if monitors is not None else _SINGLE_MONITOR
+
+    def grab(self, _rect: object):
+        return _FakeShot(self._raw)
+
+
+class _FakeShot:
+    def __init__(self, raw: bytearray) -> None:
+        self.raw = raw
+
+# mss-style monitor tables: index 0 is the virtual screen, the rest are
+# physical monitors.
+_SINGLE_MONITOR = [
+    {"left": 0, "top": 0, "width": 1920, "height": 1080},
+]
+_TWO_MONITORS = [
+    {"left": 0, "top": 0, "width": 3840, "height": 1080},
+    {"left": 0, "top": 0, "width": 1920, "height": 1080},
+    {"left": 1920, "top": 0, "width": 1920, "height": 1080},
+]
+
+
+def _white_frame(width: int, height: int) -> bytearray:
+    return bytearray(bytes((255, 255, 255, 255)) * width * height)
+
+
+def _pixel(frame: bytes, x: int, y: int, width: int) -> bytes:
+    i = (y * width + x) * 4
+    return frame[i : i + 4]
+
+
+def test_preview_window_is_erased_from_captured_frames() -> None:
+    """The preview window's rect is painted black, so frames cannot show it."""
+    w, h = 32, 24
+    source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
+    source._sct = cast(MSS, _FakeSct(_white_frame(w, h)))
+    source.exclude = lambda: WindowRect(10, 8, 4, 3)
+    frame = source.grab()
+    for y in range(8, 11):
+        for x in range(10, 14):
+            assert _pixel(frame, x, y, w) == b"\x00\x00\x00\x00"
+    # Pixels outside the excluded window stay untouched.
+    assert _pixel(frame, 0, 0, w) == b"\xff\xff\xff\xff"
+    assert _pixel(frame, 9, 8, w) == b"\xff\xff\xff\xff"
+    assert _pixel(frame, 10, 7, w) == b"\xff\xff\xff\xff"
+
+
+def test_excluded_window_outside_capture_is_noop() -> None:
+    """A window rect outside the captured area leaves the frame untouched."""
+    w, h = 32, 24
+    frame = _white_frame(w, h)
+    source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
+    source._sct = cast(MSS, _FakeSct(frame))
+    source.exclude = lambda: WindowRect(100, 100, 4, 3)
+    assert bytes(source.grab()) == bytes(frame)
+
+
+def test_session_wires_preview_window_as_capture_exclude() -> None:
+    """With a preview, the session excludes the window from the source."""
+    preview = _FakePreview(quit_after=1)
+    source = _NeverFails()
+    session = DefaultRecordingSession(source, _RecordingEncoder(), fps=30, preview=preview)
+    session.start()
+    try:
+        assert source.exclude == preview.window_rect
+    finally:
+        session.request_stop()
+        session.stop()
+
+
+def test_preview_moves_to_spare_monitor_in_fullscreen() -> None:
+    """Fullscreen capture places the preview on the first unrecorded monitor."""
+    source = FullscreenSource(1, cursor_highlight=False)
+    source._sct = cast(MSS, _FakeSct(monitors=_TWO_MONITORS))
+    assert source.preview_position() == (1920 + PREVIEW_MARGIN, PREVIEW_MARGIN)
+
+
+def test_preview_position_none_without_spare_monitor() -> None:
+    """A single monitor leaves the preview on the captured screen."""
+    source = FullscreenSource(1, cursor_highlight=False)
+    source._sct = cast(MSS, _FakeSct(monitors=_SINGLE_MONITOR))
+    assert source.preview_position() is None
+
+
+def test_region_capture_places_preview_on_untouched_monitor() -> None:
+    """Region capture places the preview on a monitor the region does not touch."""
+    source = RegionSource(WindowRect(0, 0, 32, 24), cursor_highlight=False)
+    source._sct = cast(MSS, _FakeSct(monitors=_TWO_MONITORS))
+    assert source.preview_position() == (1920 + PREVIEW_MARGIN, PREVIEW_MARGIN)
+
+
+def test_region_spanning_all_monitors_has_no_preview_position() -> None:
+    """A region touching every monitor leaves the preview on the captured screen."""
+    source = RegionSource(WindowRect(0, 0, 32, 24), cursor_highlight=False)
+    source._sct = cast(
+        MSS,
+        _FakeSct(
+            monitors=[
+                {"left": 0, "top": 0, "width": 1920, "height": 1080},
+                {"left": -10, "top": -10, "width": 1920, "height": 1080},
+            ]
+        ),
+    )
+    assert source.preview_position() is None
 
 
 # --------------------------------------------------------------------------- #

@@ -25,3 +25,4 @@ When developing, always make sure to use the library correctly by reading the li
 ## Developing Notes
 
 - Use `uv` to develop the project, such as adding dependencies, running scripts, etc
+- Write a concise commit message in Chinese for every commit.
