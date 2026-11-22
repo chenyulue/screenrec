@@ -42,6 +42,7 @@ class FfmpegFrameEncoder(FrameEncoder):
             "-s", f"{width}x{height}",
             "-r", str(fps),
             "-i", "-",
+            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             output,

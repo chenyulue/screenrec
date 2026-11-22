@@ -5,10 +5,12 @@ that the rest of the pipeline consumes frames from. Fullscreen, region, and
 window capture sources are implemented against this boundary.
 """
 
+import ctypes
 import subprocess
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 import mss
@@ -242,6 +244,19 @@ class RegionSource(WindowSource):
         return None
 
 
+def _ensure_dpi_aware() -> None:
+    """Make the process per-monitor DPI aware on Windows.
+
+    ``GetWindowRect`` reports logical pixels in a DPI-unaware process, while
+    mss captures physical pixels; at any display scaling other than 100% the
+    window rects would then be misaligned with the captured frames.
+    """
+    if sys.platform == "win32":
+        with suppress(OSError):
+            # PROCESS_PER_MONITOR_DPI_AWARE
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+
+
 def list_windows() -> list[tuple[str, WindowRect]]:
     """Enumerate all top-level windows as (title, bounding rect) pairs.
 
@@ -249,6 +264,7 @@ def list_windows() -> list[tuple[str, WindowRect]]:
     Platform-specific enumeration sits behind this boundary, same as
     ``find_window``, so callers never see platform differences.
     """
+    _ensure_dpi_aware()
     if sys.platform == "win32":
         return _list_windows_windows()
     return _list_windows_x11()
@@ -262,6 +278,7 @@ def find_window(title_substring: str) -> WindowMatch:
     differences. When several windows match, the first match is taken and a
     warning is returned.
     """
+    _ensure_dpi_aware()
     if sys.platform == "win32":
         return _find_window_windows(title_substring)
     return _find_window_x11(title_substring)

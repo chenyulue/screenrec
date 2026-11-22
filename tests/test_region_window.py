@@ -12,10 +12,12 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
+from screenrec.capture import find_window, list_windows
 from screenrec.cli.main import build_parser
 
 
@@ -151,6 +153,28 @@ def test_list_windows_shows_open_window_titles(tmp_path: Path) -> None:
         helper.terminate()
     assert result.returncode == 0, result.stderr
     assert WINDOW_TITLE in result.stdout
+
+
+def test_window_enumeration_ensures_dpi_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Window enumeration must make the process DPI-aware first.
+
+    Regression test for scaled displays: GetWindowRect reports logical pixels
+    in a DPI-unaware process, while mss captures physical pixels, so window
+    rects were misaligned with the recorded frames at any scaling other than
+    100%.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "screenrec.capture._ensure_dpi_aware", lambda: calls.append("dpi")
+    )
+    with pytest.raises(ValueError):
+        find_window("screenrec-no-such-window-xyz")
+    assert calls == ["dpi"]
+
+    calls.clear()
+    with suppress(ValueError):  # platform enumeration may fail; _ensure_dpi_aware already ran
+        list_windows()
+    assert calls == ["dpi"]
 
 
 @needs_ffprobe

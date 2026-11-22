@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from screenrec.encoder import FfmpegFrameEncoder
+
 
 def run_screenrec(*args: str, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     screenrec = shutil.which("screenrec")
@@ -76,6 +78,17 @@ def _drive_stop_trigger(proc: subprocess.Popen, trigger: Callable[[subprocess.Po
             proc.kill()
 
 @needs_ffprobe
+@needs_ffprobe
+def test_encoder_accepts_odd_frame_dimensions(tmp_path: Path) -> None:
+    """libx264 requires even dimensions; odd capture sizes must still encode."""
+    output = tmp_path / "odd.mp4"
+    encoder = FfmpegFrameEncoder(474, 359, 15, str(output))
+    encoder.push(b"\x00" * 474 * 359 * 4)
+    encoder.finalize()
+    assert output.is_file()
+    assert ffprobe_frames(output) > 0
+
+
 def test_duration_records_fullscreen_and_produces_valid_mp4(tmp_path: Path) -> None:
     result = run_screenrec("--monitor", "1", "--duration", "1", "--fps", "15", cwd=tmp_path)
 
