@@ -57,16 +57,29 @@ class OpenCvPreview(Preview):
         self._height = height
         self._quit = False
         self._rect: WindowRect | None = None
+        # Requested window position, applied on the first show(): on Linux GTK
+        # the window is not mapped until the first imshow, and the window
+        # manager ignores move requests for unmapped windows.
+        self._position = position
         cv2.namedWindow(self.WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.WINDOW_NAME, width, height)
         if position is not None:
+            # Best-effort move at creation (effective on Windows); on Linux it
+            # is re-applied once the window is mapped in show().
             cv2.moveWindow(self.WINDOW_NAME, position[0], position[1])
         self._update_rect()
 
     def show(self, frame: bytes) -> None:
-        bgra = np.frombuffer(frame, dtype=np.uint8).reshape(self._height, self._width, 4)
+        bgra = np.frombuffer(frame, dtype=np.uint8).reshape(
+            self._height, self._width, 4
+        )
         bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
         cv2.imshow(self.WINDOW_NAME, bgr)
+        if self._position is not None:
+            # The window is mapped now, so the window manager honors the move
+            # request: the preview lands on the intended monitor.
+            cv2.moveWindow(self.WINDOW_NAME, self._position[0], self._position[1])
+            self._position = None
         self._update_rect()
         if (cv2.waitKey(1) & 0xFF) == ord("q"):
             self._quit = True

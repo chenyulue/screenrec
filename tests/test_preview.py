@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import cast
 
+import cv2
 import pytest
 from mss.base import MSS
 
@@ -30,7 +31,7 @@ from screenrec.capture import (
 )
 from screenrec.cli.main import build_parser
 from screenrec.encoder import FrameEncoder
-from screenrec.preview import Preview
+from screenrec.preview import OpenCvPreview, Preview
 from screenrec.session import DefaultRecordingSession
 
 # --------------------------------------------------------------------------- #
@@ -213,7 +214,9 @@ def test_session_wires_preview_window_as_capture_exclude() -> None:
     """With a preview, the session excludes the window from the source."""
     preview = _FakePreview(quit_after=1)
     source = _NeverFails()
-    session = DefaultRecordingSession(source, _RecordingEncoder(), fps=30, preview=preview)
+    session = DefaultRecordingSession(
+        source, _RecordingEncoder(), fps=30, preview=preview
+    )
     session.start()
     try:
         assert source.exclude == preview.window_rect
@@ -325,3 +328,41 @@ def test_preview_only_writes_no_file(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "recordings").exists()
     assert not list(tmp_path.glob("*.mp4"))
+
+
+# --------------------------------------------------------------------------- #
+# OpenCvPreview window-position tests (no display needed; cv2 is faked)
+# --------------------------------------------------------------------------- #
+
+
+def test_preview_applies_position_on_first_show(monkeypatch) -> None:
+    """The requested window position is applied on the first show().
+
+    On Linux GTK the window manager ignores move requests for unmapped
+    windows, so the position must be (re)applied once imshow has mapped the
+    window, not only at construction time.
+    """
+    moves: list[tuple[int, int]] = []
+
+    def fake_move(name: str, x: int, y: int) -> None:
+        moves.append((x, y))
+
+    monkeypatch.setattr(cv2, "namedWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "resizeWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "imshow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "moveWindow", fake_move)
+    monkeypatch.setattr(cv2, "getWindowImageRect", lambda name: (0, 0, 0, 0))
+    monkeypatch.setattr(cv2, "waitKey", lambda ms: 0)
+
+    preview = OpenCvPreview(8, 6, position=(100, 200))
+    # Best-effort move at construction time.
+    assert moves == [(100, 200)]
+
+    frame = bytes((255, 255, 255, 255) * 8 * 6)
+    preview.show(frame)
+    # The first show maps the window and applies the position once.
+    assert moves == [(100, 200), (100, 200)]
+
+    preview.show(frame)
+    # No further moves on subsequent frames.
+    assert moves == [(100, 200), (100, 200)]
