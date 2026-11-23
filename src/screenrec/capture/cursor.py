@@ -117,6 +117,8 @@ def _x11_display() -> tuple[ctypes.CDLL, int] | None:
                 ctypes.POINTER(ctypes.c_ulong),
             ]
             library.XQueryPointer.restype = ctypes.c_int
+            library.XDefaultRootWindow.restype = ctypes.c_ulong
+            library.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
             display = library.XOpenDisplay(None)
             if display:
                 _X11_DISPLAY = (library, display)
@@ -130,14 +132,20 @@ def _cursor_x11() -> tuple[tuple[int, int], CursorImage | None] | None:
     if x11 is None:
         return None
     library, display = x11
-    root = ctypes.c_ulong(0)
+    # XQueryPointer's window argument must be a valid window: query the root
+    # window of the default screen. Passing 0 (NULL) makes the X server reject
+    # the request with BadWindow.
+    root_win = library.XDefaultRootWindow(display)
+    if root_win == 0:
+        return None
+    root = ctypes.c_ulong(root_win)
     child = ctypes.c_ulong(0)
     root_x, root_y = ctypes.c_int(0), ctypes.c_int(0)
     win_x, win_y = ctypes.c_int(0), ctypes.c_int(0)
     mask = ctypes.c_ulong(0)
     found = library.XQueryPointer(
         display,
-        root,
+        root_win,
         ctypes.byref(root),
         ctypes.byref(child),
         ctypes.byref(root_x),
