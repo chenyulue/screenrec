@@ -23,15 +23,13 @@ import pytest
 from mss.base import MSS
 
 from screenrec.capture import (
-    PREVIEW_MARGIN,
-    FullscreenSource,
     RegionSource,
     WindowRect,
     WindowSource,
 )
 from screenrec.cli.main import build_parser
 from screenrec.encoder import FrameEncoder
-from screenrec.preview import OpenCvPreview, Preview
+from screenrec.preview import PREVIEW_MARGIN, OpenCvPreview, Preview, resolve_placement
 from screenrec.session import DefaultRecordingSession
 
 # --------------------------------------------------------------------------- #
@@ -66,6 +64,12 @@ class _NeverFails(WindowSource):
     def grab(self) -> bytes:
         return b"\x00" * 16
 
+    def capture_rect(self) -> WindowRect:
+        return WindowRect(0, 0, 4, 4)
+
+    def monitors(self) -> list[dict]:
+        return []
+
 
 class _RecordingEncoder(FrameEncoder):
     """Records pushed frames and whether finalize ran."""
@@ -89,6 +93,9 @@ class _FakePreview(Preview):
         self._shown = 0
         self._quit = False
         self.closed = False
+        # No real window, but a fixed rect the session can wire in; set to
+        # None to simulate a window that cannot be located.
+        self.rect: WindowRect | None = WindowRect(0, 0, 1, 1)
 
     def show(self, frame: bytes) -> None:
         self._shown += 1
@@ -98,9 +105,9 @@ class _FakePreview(Preview):
     def quit_requested(self) -> bool:
         return self._quit
 
-    def window_rect(self) -> WindowRect | None:
-        """The fake has no real window, so there is nothing to exclude."""
-        return None
+    def prepare(self) -> WindowRect | None:
+        """Return the fake's fixed rect (or None when it is unset)."""
+        return self.rect
 
     def close(self) -> None:
         self.closed = True
@@ -189,7 +196,7 @@ def test_preview_window_is_erased_from_captured_frames() -> None:
     w, h = 32, 24
     source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
     source._sct = cast(MSS, _FakeSct(_white_frame(w, h)))
-    source.exclude = lambda: WindowRect(10, 8, 4, 3)
+    source.set_exclude(WindowRect(10, 8, 4, 3))
     frame = source.grab()
     for y in range(8, 11):
         for x in range(10, 14):
@@ -206,7 +213,7 @@ def test_excluded_window_outside_capture_is_noop() -> None:
     frame = _white_frame(w, h)
     source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
     source._sct = cast(MSS, _FakeSct(frame))
-    source.exclude = lambda: WindowRect(100, 100, 4, 3)
+    source.set_exclude(WindowRect(100, 100, 4, 3))
     assert bytes(source.grab()) == bytes(frame)
 
 
@@ -219,46 +226,82 @@ def test_session_wires_preview_window_as_capture_exclude() -> None:
     )
     session.start()
     try:
-        assert source.exclude == preview.window_rect
+        assert source._exclude == preview.rect
     finally:
         session.request_stop()
         session.stop()
 
 
-def test_preview_moves_to_spare_monitor_in_fullscreen() -> None:
-    """Fullscreen capture places the preview on the first unrecorded monitor."""
-    source = FullscreenSource(1, cursor_highlight=False)
-    source._sct = cast(MSS, _FakeSct(monitors=_TWO_MONITORS))
-    assert source.preview_position() == (1920 + PREVIEW_MARGIN, PREVIEW_MARGIN)
+def test_session_refuses_to_start_when_preview_rect_unavailable() -> None:
+    """A preview window that cannot be located is a hard failure: recording
+    with it would capture the preview inside its own frames."""
+    preview = _FakePreview(quit_after=1)
+    preview.rect = None
+    session = DefaultRecordingSession(
+        _NeverFails(), _RecordingEncoder(), fps=30, preview=preview
+    )
+    with pytest.raises(RuntimeError, match="preview window could not be located"):
+        session.start()
 
 
-def test_preview_position_none_without_spare_monitor() -> None:
+class _ExcludeCheckSource(WindowSource):
+    """Records the exclude rect seen at the first grab."""
+
+    def __init__(self) -> None:
+        self.seen: WindowRect | None = None
+
+    def grab(self) -> bytes:
+        self.seen = self._exclude
+        return b"\x00" * 16
+
+    def capture_rect(self) -> WindowRect:
+        return WindowRect(0, 0, 4, 4)
+
+    def monitors(self) -> list[dict]:
+        return []
+
+
+def test_exclude_is_set_before_the_first_captured_frame() -> None:
+    """Regression for the first-frames hole: the preview rect is wired into
+    the source before the capture thread can grab a single frame."""
+    preview = _FakePreview(quit_after=5)
+    source = _ExcludeCheckSource()
+    session = DefaultRecordingSession(
+        source, _RecordingEncoder(), fps=30, preview=preview
+    )
+    _run_to_completion(session)
+    assert source.seen == preview.rect
+
+
+def test_fullscreen_capture_places_preview_on_spare_monitor() -> None:
+    """Fullscreen capture places the preview on a monitor it does not touch."""
+    capture_rect = WindowRect(0, 0, 1920, 1080)
+    assert resolve_placement(capture_rect, _TWO_MONITORS) == (
+        1920 + PREVIEW_MARGIN,
+        PREVIEW_MARGIN,
+    )
+
+
+def test_no_spare_monitor_leaves_preview_without_position() -> None:
     """A single monitor leaves the preview on the captured screen."""
-    source = FullscreenSource(1, cursor_highlight=False)
-    source._sct = cast(MSS, _FakeSct(monitors=_SINGLE_MONITOR))
-    assert source.preview_position() is None
+    assert resolve_placement(WindowRect(0, 0, 1920, 1080), _SINGLE_MONITOR) is None
 
 
 def test_region_capture_places_preview_on_untouched_monitor() -> None:
     """Region capture places the preview on a monitor the region does not touch."""
-    source = RegionSource(WindowRect(0, 0, 32, 24), cursor_highlight=False)
-    source._sct = cast(MSS, _FakeSct(monitors=_TWO_MONITORS))
-    assert source.preview_position() == (1920 + PREVIEW_MARGIN, PREVIEW_MARGIN)
-
-
-def test_region_spanning_all_monitors_has_no_preview_position() -> None:
-    """A region touching every monitor leaves the preview on the captured screen."""
-    source = RegionSource(WindowRect(0, 0, 32, 24), cursor_highlight=False)
-    source._sct = cast(
-        MSS,
-        _FakeSct(
-            monitors=[
-                {"left": 0, "top": 0, "width": 1920, "height": 1080},
-                {"left": -10, "top": -10, "width": 1920, "height": 1080},
-            ]
-        ),
+    assert resolve_placement(WindowRect(0, 0, 32, 24), _TWO_MONITORS) == (
+        1920 + PREVIEW_MARGIN,
+        PREVIEW_MARGIN,
     )
-    assert source.preview_position() is None
+
+
+def test_capture_touching_every_monitor_has_no_placement() -> None:
+    """A capture touching every monitor leaves the preview on the captured screen."""
+    monitors = [
+        {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"left": -10, "top": -10, "width": 1920, "height": 1080},
+    ]
+    assert resolve_placement(WindowRect(0, 0, 32, 24), monitors) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -335,12 +378,12 @@ def test_preview_only_writes_no_file(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_preview_applies_position_on_first_show(monkeypatch) -> None:
-    """The requested window position is applied on the first show().
+def test_preview_prepare_maps_window_and_applies_position(monkeypatch) -> None:
+    """The requested window position is applied once the window is mapped.
 
     On Linux GTK the window manager ignores move requests for unmapped
-    windows, so the position must be (re)applied once imshow has mapped the
-    window, not only at construction time.
+    windows, so prepare() — not construction — maps the window, applies the
+    move and reads the rect back.
     """
     moves: list[tuple[int, int]] = []
 
@@ -351,18 +394,31 @@ def test_preview_applies_position_on_first_show(monkeypatch) -> None:
     monkeypatch.setattr(cv2, "resizeWindow", lambda *args, **kwargs: None)
     monkeypatch.setattr(cv2, "imshow", lambda *args, **kwargs: None)
     monkeypatch.setattr(cv2, "moveWindow", fake_move)
-    monkeypatch.setattr(cv2, "getWindowImageRect", lambda name: (0, 0, 0, 0))
+    monkeypatch.setattr(cv2, "getWindowImageRect", lambda name: (100, 200, 8, 6))
     monkeypatch.setattr(cv2, "waitKey", lambda ms: 0)
 
     preview = OpenCvPreview(8, 6, position=(100, 200))
     # Best-effort move at construction time.
     assert moves == [(100, 200)]
 
-    frame = bytes((255, 255, 255, 255) * 8 * 6)
-    preview.show(frame)
-    # The first show maps the window and applies the position once.
+    assert preview.prepare() == WindowRect(100, 200, 8, 6)
+    # The window is mapped now, so the move is applied once.
     assert moves == [(100, 200), (100, 200)]
 
-    preview.show(frame)
-    # No further moves on subsequent frames.
+    preview.show(bytes((255, 255, 255, 255) * 8 * 6))
+    # Showing frames never moves the window again.
     assert moves == [(100, 200), (100, 200)]
+
+
+def test_preview_prepare_returns_none_when_rect_unavailable(monkeypatch) -> None:
+    """A window that cannot be located reports None, so the session refuses
+    to record with the preview inside the captured area."""
+    monkeypatch.setattr(cv2, "namedWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "resizeWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "imshow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "moveWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cv2, "getWindowImageRect", lambda name: (0, 0, 0, 0))
+    monkeypatch.setattr(cv2, "waitKey", lambda ms: 0)
+
+    preview = OpenCvPreview(8, 6)
+    assert preview.prepare() is None

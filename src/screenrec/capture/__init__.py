@@ -9,12 +9,12 @@ import ctypes
 import subprocess
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
 import mss
 from mss.base import MSS
+from mss.screenshot import ScreenShot
 
 from screenrec.capture.cursor import CursorAnnotator
 
@@ -47,37 +47,73 @@ class WindowMatch:
     warning: str | None = None
 
 
-# Inset from a monitor's edge when placing the preview window on it.
-PREVIEW_MARGIN = 20
-
-
-def _monitor_overlaps(monitor: dict, rect: dict) -> bool:
-    """Whether a monitor's rect intersects the captured rect."""
-    return not (
-        monitor["left"] + monitor["width"] <= rect["left"]
-        or rect["left"] + rect["width"] <= monitor["left"]
-        or monitor["top"] + monitor["height"] <= rect["top"]
-        or rect["top"] + rect["height"] <= monitor["top"]
-    )
-
-
 class WindowSource(ABC):
     """A source of raw screen frames for the recording pipeline."""
 
-    # Optional provider of a window rectangle to erase from every frame: a
-    # callable returning WindowRect | None. The session wires the preview
-    # window here, so the capture never shows (or records) itself.
-    exclude: Callable[[], WindowRect | None] | None = None
+    # Window rectangle painted out of every frame. Set once by the recording
+    # session via ``set_exclude`` before the capture thread starts, so the
+    # capture thread only ever reads a fixed value.
+    _exclude: WindowRect | None = None
+
+    def set_exclude(self, rect: WindowRect | None) -> None:
+        """Set the window rectangle to erase from every frame."""
+        self._exclude = rect
+
     @abstractmethod
     def grab(self) -> bytes:
         """Capture and return one raw frame."""
         ...
 
-    def preview_position(self) -> tuple[int, int] | None:
-        """Recommended top-left for the preview window: a monitor the capture
-        does not touch, or None when there is no spare monitor."""
-        return None
+    @abstractmethod
+    def capture_rect(self) -> WindowRect:
+        """The area of the virtual screen this source captures."""
+        ...
 
+    @abstractmethod
+    def monitors(self) -> list[dict]:
+        """The virtual screen's monitor table (mss monitor dicts)."""
+        ...
+
+
+class _MssFrameSource(WindowSource):
+    """Shared frame preparation for all mss-backed sources.
+
+    Cursor annotation and preview-window erasure collapse into one
+    ``prepare_frame`` step, so a new source cannot forget the erase that
+    keeps the preview out of the recording.
+    """
+
+    # Set by each subclass once its captured rect is known.
+    _annotator: CursorAnnotator
+
+    def __init__(self, cursor_highlight: bool) -> None:
+        self._sct = _open_mss(cursor_highlight)
+
+    def monitors(self) -> list[dict]:
+        return self._sct.monitors
+
+    @property
+    def width(self) -> int:
+        return self.capture_rect().width
+
+    @property
+    def height(self) -> int:
+        return self.capture_rect().height
+
+    def prepare_frame(self, shot: ScreenShot) -> bytes:
+        """Annotate the reused mss buffer in place, erase the excluded
+        window, then hand the caller a private copy."""
+        rect = self.capture_rect()
+        frame = self._annotator.annotate(shot.raw)
+        _erase_excluded_window(
+            frame,
+            rect.width,
+            rect.height,
+            rect.left,
+            rect.top,
+            self._exclude,
+        )
+        return bytes(frame)
 
 def _erase_excluded_window(
     frame: bytearray,
@@ -85,25 +121,22 @@ def _erase_excluded_window(
     height: int,
     left: int,
     top: int,
-    exclude: Callable[[], WindowRect | None] | None,
+    exclude: WindowRect | None,
 ) -> None:
     """Paint the excluded window's rectangle black, in place.
 
     The preview window sits on the screen being captured; without this the
     preview would show itself inside itself, a recursive preview. ``exclude``
-    returns the window's rect on the virtual screen (or None when there is
+    is the window's rect on the virtual screen (or None when there is
     nothing to exclude); its coordinates are mapped into the frame's local
     space and clipped to it.
     """
     if exclude is None:
         return
-    rect = exclude()
-    if rect is None:
-        return
-    x0 = max(rect.left - left, 0)
-    y0 = max(rect.top - top, 0)
-    x1 = min(rect.left + rect.width - left, width)
-    y1 = min(rect.top + rect.height - top, height)
+    x0 = max(exclude.left - left, 0)
+    y0 = max(exclude.top - top, 0)
+    x1 = min(exclude.left + exclude.width - left, width)
+    y1 = min(exclude.top + exclude.height - top, height)
     if x0 >= x1 or y0 >= y1:
         return  # excluded window is outside the captured area
     for row in range(y0, y1):
@@ -111,16 +144,15 @@ def _erase_excluded_window(
         frame[start : start + (x1 - x0) * 4] = b"\x00" * ((x1 - x0) * 4)
 
 
-class FullscreenSource(WindowSource):
+class FullscreenSource(_MssFrameSource):
     """mss-backed fullscreen capture for a single monitor (raw BGRA frames)."""
 
     def __init__(
         self,
         monitor: int = 1,
         cursor_highlight: bool = True,
-        exclude: Callable[[], WindowRect | None] | None = None,
     ) -> None:
-        self._sct = _open_mss(cursor_highlight)
+        super().__init__(cursor_highlight)
         monitors = self._sct.monitors
         # mss reserves index 0 for the virtual full-screen dummy entry.
         if not 1 <= monitor < len(monitors):
@@ -128,7 +160,6 @@ class FullscreenSource(WindowSource):
                 f"monitor {monitor} is out of range: 1..{len(monitors) - 1}"
             )
         self._monitor = monitors[monitor]
-        self._monitor_index = monitor
         self._annotator = CursorAnnotator(
             self._monitor["width"],
             self._monitor["height"],
@@ -136,54 +167,27 @@ class FullscreenSource(WindowSource):
             self._monitor["top"],
             enabled=cursor_highlight,
         )
-        self.exclude = exclude
-
-
-    @property
-    def width(self) -> int:
-        return self._monitor["width"]
-
-    @property
-    def height(self) -> int:
-        return self._monitor["height"]
 
     def grab(self) -> bytes:
-        shot = self._sct.grab(self._monitor)
-        # Annotate the reused mss buffer in place, then hand the session a
-        # private copy.
-        frame = self._annotator.annotate(shot.raw)
-        _erase_excluded_window(
-            frame,
-            self._monitor["width"],
-            self._monitor["height"],
-            self._monitor["left"],
-            self._monitor["top"],
-            self.exclude,
+        return self.prepare_frame(self._sct.grab(self._monitor))
+
+    def capture_rect(self) -> WindowRect:
+        """The recorded monitor's rect on the virtual screen."""
+        monitor = self._monitor
+        return WindowRect(
+            monitor["left"], monitor["top"], monitor["width"], monitor["height"]
         )
-        return bytes(frame)
-
-    def preview_position(self) -> tuple[int, int] | None:
-        """Top-left of the first physical monitor that is not being recorded."""
-        for index, candidate in enumerate(self._sct.monitors):
-            if index in (0, self._monitor_index):
-                continue
-            return (
-                candidate["left"] + PREVIEW_MARGIN,
-                candidate["top"] + PREVIEW_MARGIN,
-            )
-        return None
 
 
-class RegionSource(WindowSource):
+class RegionSource(_MssFrameSource):
     """mss-backed capture of an arbitrary rectangular region (raw BGRA frames)."""
 
     def __init__(
         self,
         rect: WindowRect,
         cursor_highlight: bool = True,
-        exclude: Callable[[], WindowRect | None] | None = None,
     ) -> None:
-        self._sct = _open_mss(cursor_highlight)
+        super().__init__(cursor_highlight)
         if rect.width <= 0 or rect.height <= 0:
             raise ValueError(
                 f"invalid region {rect.left},{rect.top},{rect.width},{rect.height}: "
@@ -209,40 +213,18 @@ class RegionSource(WindowSource):
         self._annotator = CursorAnnotator(
             rect.width, rect.height, rect.left, rect.top, enabled=cursor_highlight
         )
-        self.exclude = exclude
-
-
-    @property
-    def width(self) -> int:
-        return self._rect["width"]
-
-    @property
-    def height(self) -> int:
-        return self._rect["height"]
 
     def grab(self) -> bytes:
-        shot = self._sct.grab(self._rect)
-        frame = self._annotator.annotate(shot.raw)
-        _erase_excluded_window(
-            frame,
-            self._rect["width"],
-            self._rect["height"],
+        return self.prepare_frame(self._sct.grab(self._rect))
+
+    def capture_rect(self) -> WindowRect:
+        """The captured region's rect on the virtual screen."""
+        return WindowRect(
             self._rect["left"],
             self._rect["top"],
-            self.exclude,
+            self._rect["width"],
+            self._rect["height"],
         )
-        return bytes(frame)
-
-    def preview_position(self) -> tuple[int, int] | None:
-        """Top-left of the first physical monitor the captured region misses."""
-        for candidate in self._sct.monitors[1:]:
-            if not _monitor_overlaps(candidate, self._rect):
-                return (
-                    candidate["left"] + PREVIEW_MARGIN,
-                    candidate["top"] + PREVIEW_MARGIN,
-                )
-        return None
-
 
 def _ensure_dpi_aware() -> None:
     """Make the process per-monitor DPI aware on Windows.

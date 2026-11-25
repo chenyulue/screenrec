@@ -9,7 +9,7 @@ partial output retained, clear error.
 
 import threading
 
-from screenrec.capture import WindowSource
+from screenrec.capture import WindowRect, WindowSource
 from screenrec.encoder import FrameEncoder
 from screenrec.session import DefaultRecordingSession
 
@@ -26,6 +26,12 @@ class _FailingSource(WindowSource):
         if self._n > self._grab_count:
             raise RuntimeError("window disappeared mid-session")
         return b"\x00" * 16
+
+    def capture_rect(self) -> WindowRect:
+        return WindowRect(0, 0, 4, 4)
+
+    def monitors(self) -> list[dict]:
+        return []
 
 
 class _RecordingEncoder(FrameEncoder):
@@ -89,6 +95,12 @@ def test_graceful_stop_finalizes_without_error() -> None:
     class _NeverFails(WindowSource):
         def grab(self) -> bytes:
             return b"\x00" * 16
+
+        def capture_rect(self) -> WindowRect:
+            return WindowRect(0, 0, 4, 4)
+
+        def monitors(self) -> list[dict]:
+            return []
 
     encoder = _RecordingEncoder()
     session = DefaultRecordingSession(_NeverFails(), encoder, fps=30, duration=0.1)

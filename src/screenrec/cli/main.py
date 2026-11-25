@@ -17,7 +17,7 @@ from screenrec.capture import (
     list_windows,
 )
 from screenrec.encoder import FfmpegFrameEncoder, NoopFrameEncoder
-from screenrec.preview import OpenCvPreview
+from screenrec.preview import OpenCvPreview, resolve_placement
 from screenrec.session import DefaultRecordingSession
 
 
@@ -174,11 +174,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         encoder = NoopFrameEncoder()
 
-    preview = (
-        OpenCvPreview(source.width, source.height, source.preview_position())
-        if preview_on
-        else None
-    )
+    preview = None
+    if preview_on:
+        position = resolve_placement(source.capture_rect(), source.monitors())
+        preview = OpenCvPreview(source.width, source.height, position)
     session = DefaultRecordingSession(
         source, encoder, args.fps, args.duration, preview=preview
     )

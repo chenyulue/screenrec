@@ -78,8 +78,17 @@ class DefaultRecordingSession(RecordingSession):
         if self._preview is not None:
             # Exclude the preview window from capture: it sits on the screen
             # being captured and would otherwise appear inside its own
-            # frames, a recursive preview.
-            self._source.exclude = self._preview.window_rect
+            # frames, a recursive preview. The window must be mapped — and
+            # its rect known — before the capture thread starts, so the
+            # preview is prepared here, on this thread; a rect that never
+            # materializes is a hard failure, not a recorded preview.
+            rect = self._preview.prepare()
+            if rect is None:
+                raise RuntimeError(
+                    "preview window could not be located; refusing to record "
+                    "with the preview inside the captured area"
+                )
+            self._source.set_exclude(rect)
         self._capture_thread.start()
         self._writer_thread.start()
         if self._duration is not None:

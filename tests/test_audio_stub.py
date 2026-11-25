@@ -9,7 +9,7 @@ audio source exists).
 import threading
 
 from screenrec.audio import AudioSource, NoopAudioSource
-from screenrec.capture import WindowSource
+from screenrec.capture import WindowRect, WindowSource
 from screenrec.encoder import FrameEncoder
 from screenrec.session import DefaultRecordingSession
 
@@ -19,6 +19,12 @@ class _NeverFailsSource(WindowSource):
 
     def grab(self) -> bytes:
         return b"\x00" * 16
+
+    def capture_rect(self) -> WindowRect:
+        return WindowRect(0, 0, 4, 4)
+
+    def monitors(self) -> list[dict]:
+        return []
 
 
 class _RecordingEncoder(FrameEncoder):
