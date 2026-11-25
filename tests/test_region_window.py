@@ -12,13 +12,13 @@ import os
 import shutil
 import subprocess
 import sys
-from contextlib import suppress
+from importlib import import_module
 from pathlib import Path
 
 import pytest
 
-from screenrec.capture import find_window, list_windows
-from screenrec.cli.main import build_parser
+from screenrec.capture import WindowRect, _first_match, _parse_wmctrl_output
+from screenrec.cli.main import build_parser, main
 
 
 def run_screenrec(*args: str, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -155,26 +155,57 @@ def test_list_windows_shows_open_window_titles(tmp_path: Path) -> None:
     assert WINDOW_TITLE in result.stdout
 
 
-def test_window_enumeration_ensures_dpi_aware(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Window enumeration must make the process DPI-aware first.
-
-    Regression test for scaled displays: GetWindowRect reports logical pixels
-    in a DPI-unaware process, while mss captures physical pixels, so window
-    rects were misaligned with the recorded frames at any scaling other than
-    100%.
+def test_cli_ensures_dpi_aware_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI makes the process DPI-aware once at startup, before any
+    window-rect query (regression test for scaled displays: GetWindowRect
+    reports logical pixels in a DPI-unaware process, while mss captures
+    physical pixels).
     """
     calls: list[str] = []
-    monkeypatch.setattr(
-        "screenrec.capture._ensure_dpi_aware", lambda: calls.append("dpi")
-    )
-    with pytest.raises(ValueError):
-        find_window("screenrec-no-such-window-xyz")
+    cli_main = import_module("screenrec.cli.main")
+    monkeypatch.setattr(cli_main, "ensure_dpi_aware", lambda: calls.append("dpi"))
+    # --list-windows runs the window-rect query path.
+    main(["--list-windows"])
     assert calls == ["dpi"]
 
-    calls.clear()
-    with suppress(ValueError):  # platform enumeration may fail; _ensure_dpi_aware already ran
-        list_windows()
-    assert calls == ["dpi"]
+
+def test_parse_wmctrl_output_extracts_titles_and_rects() -> None:
+    """wmctrl -lG lines: window-id desktop-id x y width height host title."""
+    text = (
+        "0x00100003 0 10 20 300 400 host1 My Window\n"
+        "0x00100004 0 -5 -5 1920 1080 host2 Second\n"
+    )
+    assert _parse_wmctrl_output(text) == [
+        ("My Window", WindowRect(10, 20, 300, 400)),
+        ("Second", WindowRect(-5, -5, 1920, 1080)),
+    ]
+
+
+def test_parse_wmctrl_output_skips_malformed_lines() -> None:
+    """Short lines and non-numeric coordinates are skipped."""
+    text = (
+        "short line\n"
+        "0x00100003 0 not-a-number 20 300 400 host bad coords\n"
+        "0x00100005 0 7 8 9 10 host Valid Window\n"
+    )
+    assert _parse_wmctrl_output(text) == [("Valid Window", WindowRect(7, 8, 9, 10))]
+
+
+def test_first_match_takes_first_and_warns_on_multiple() -> None:
+    matches = [WindowRect(0, 0, 10, 10), WindowRect(20, 20, 10, 10)]
+    match = _first_match(matches, "win")
+    assert match.rect == matches[0]
+    assert match.warning is not None and "2 windows match" in match.warning
+
+
+def test_first_match_no_warning_when_unique() -> None:
+    match = _first_match([WindowRect(0, 0, 10, 10)], "win")
+    assert match.warning is None
+
+
+def test_first_match_raises_when_nothing_matches() -> None:
+    with pytest.raises(ValueError, match="no window matches"):
+        _first_match([], "win")
 
 
 @needs_ffprobe

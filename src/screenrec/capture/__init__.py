@@ -59,6 +59,16 @@ class WindowSource(ABC):
         """Set the window rectangle to erase from every frame."""
         self._exclude = rect
 
+    @property
+    def width(self) -> int:
+        """Frame width in pixels, derived from the captured rect."""
+        return self.capture_rect().width
+
+    @property
+    def height(self) -> int:
+        """Frame height in pixels, derived from the captured rect."""
+        return self.capture_rect().height
+
     @abstractmethod
     def grab(self) -> bytes:
         """Capture and return one raw frame."""
@@ -86,19 +96,13 @@ class _MssFrameSource(WindowSource):
     # Set by each subclass once its captured rect is known.
     _annotator: CursorAnnotator
 
-    def __init__(self, cursor_highlight: bool) -> None:
-        self._sct = _open_mss(cursor_highlight)
+    def __init__(self, cursor_highlight: bool, *, sct: MSS | None = None) -> None:
+        # Injected mss backend (tests supply a fake); opened for real by default.
+        self._sct = sct if sct is not None else _open_mss(cursor_highlight)
 
     def monitors(self) -> list[dict]:
         return self._sct.monitors
 
-    @property
-    def width(self) -> int:
-        return self.capture_rect().width
-
-    @property
-    def height(self) -> int:
-        return self.capture_rect().height
 
     def prepare_frame(self, shot: ScreenShot) -> bytes:
         """Annotate the reused mss buffer in place, erase the excluded
@@ -151,8 +155,10 @@ class FullscreenSource(_MssFrameSource):
         self,
         monitor: int = 1,
         cursor_highlight: bool = True,
+        *,
+        sct: MSS | None = None,
     ) -> None:
-        super().__init__(cursor_highlight)
+        super().__init__(cursor_highlight, sct=sct)
         monitors = self._sct.monitors
         # mss reserves index 0 for the virtual full-screen dummy entry.
         if not 1 <= monitor < len(monitors):
@@ -186,8 +192,10 @@ class RegionSource(_MssFrameSource):
         self,
         rect: WindowRect,
         cursor_highlight: bool = True,
+        *,
+        sct: MSS | None = None,
     ) -> None:
-        super().__init__(cursor_highlight)
+        super().__init__(cursor_highlight, sct=sct)
         if rect.width <= 0 or rect.height <= 0:
             raise ValueError(
                 f"invalid region {rect.left},{rect.top},{rect.width},{rect.height}: "
@@ -226,12 +234,14 @@ class RegionSource(_MssFrameSource):
             self._rect["height"],
         )
 
-def _ensure_dpi_aware() -> None:
+def ensure_dpi_aware() -> None:
     """Make the process per-monitor DPI aware on Windows.
 
-    ``GetWindowRect`` reports logical pixels in a DPI-unaware process, while
-    mss captures physical pixels; at any display scaling other than 100% the
-    window rects would then be misaligned with the captured frames.
+    Process-start setup step: ``GetWindowRect`` reports logical pixels in a
+    DPI-unaware process, while mss captures physical pixels; at any display
+    scaling other than 100% window rects are then misaligned with the
+    captured frames. Call once at process start, before any window-rect
+    query (``list_windows``/``find_window``).
     """
     if sys.platform == "win32":
         with suppress(OSError):
@@ -245,8 +255,9 @@ def list_windows() -> list[tuple[str, WindowRect]]:
     Backs ``--list-windows`` so the user can pick a target for ``--window``.
     Platform-specific enumeration sits behind this boundary, same as
     ``find_window``, so callers never see platform differences.
+    ``ensure_dpi_aware()`` must have run beforehand on Windows.
     """
-    _ensure_dpi_aware()
+
     if sys.platform == "win32":
         return _list_windows_windows()
     return _list_windows_x11()
@@ -259,8 +270,8 @@ def find_window(title_substring: str) -> WindowMatch:
     Linux X11) sits behind this boundary so callers never see platform
     differences. When several windows match, the first match is taken and a
     warning is returned.
+    ``ensure_dpi_aware()`` must have run beforehand on Windows.
     """
-    _ensure_dpi_aware()
     if sys.platform == "win32":
         return _find_window_windows(title_substring)
     return _find_window_x11(title_substring)
@@ -284,20 +295,15 @@ def _find_window_windows(title_substring: str) -> WindowMatch:
     return _first_match(matches, title_substring)
 
 
-def _list_windows_x11() -> list[tuple[str, WindowRect]]:
-    try:
-        result = subprocess.run(
-            ["wmctrl", "-lG"], capture_output=True, text=True, check=False
-        )
-    except FileNotFoundError:
-        raise ValueError(
-            "wmctrl is not installed; required for window capture on Linux"
-        ) from None
-    if result.returncode != 0:
-        raise ValueError(f"wmctrl failed: {result.stderr.strip()}")
+def _parse_wmctrl_output(text: str) -> list[tuple[str, WindowRect]]:
+    """Parse ``wmctrl -lG`` output into (title, rect) pairs.
+
+    Each line is: window-id desktop-id x y width height hostname title;
+    lines with fewer fields or non-numeric coordinates are skipped.
+    """
     # wmctrl -lG prints: window-id desktop-id x y width height hostname title.
     windows: list[tuple[str, WindowRect]] = []
-    for line in result.stdout.splitlines():
+    for line in text.splitlines():
         fields = line.split()
         if len(fields) < 8:
             continue
@@ -311,6 +317,20 @@ def _list_windows_x11() -> list[tuple[str, WindowRect]]:
             continue
         windows.append((title, rect))
     return windows
+
+
+def _list_windows_x11() -> list[tuple[str, WindowRect]]:
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-lG"], capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        raise ValueError(
+            "wmctrl is not installed; required for window capture on Linux"
+        ) from None
+    if result.returncode != 0:
+        raise ValueError(f"wmctrl failed: {result.stderr.strip()}")
+    return _parse_wmctrl_output(result.stdout)
 
 
 def _find_window_x11(title_substring: str) -> WindowMatch:

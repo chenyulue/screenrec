@@ -194,8 +194,11 @@ def _pixel(frame: bytes, x: int, y: int, width: int) -> bytes:
 def test_preview_window_is_erased_from_captured_frames() -> None:
     """The preview window's rect is painted black, so frames cannot show it."""
     w, h = 32, 24
-    source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
-    source._sct = cast(MSS, _FakeSct(_white_frame(w, h)))
+    source = RegionSource(
+        WindowRect(0, 0, w, h),
+        cursor_highlight=False,
+        sct=cast(MSS, _FakeSct(_white_frame(w, h))),
+    )
     source.set_exclude(WindowRect(10, 8, 4, 3))
     frame = source.grab()
     for y in range(8, 11):
@@ -211,8 +214,11 @@ def test_excluded_window_outside_capture_is_noop() -> None:
     """A window rect outside the captured area leaves the frame untouched."""
     w, h = 32, 24
     frame = _white_frame(w, h)
-    source = RegionSource(WindowRect(0, 0, w, h), cursor_highlight=False)
-    source._sct = cast(MSS, _FakeSct(frame))
+    source = RegionSource(
+        WindowRect(0, 0, w, h),
+        cursor_highlight=False,
+        sct=cast(MSS, _FakeSct(frame)),
+    )
     source.set_exclude(WindowRect(100, 100, 4, 3))
     assert bytes(source.grab()) == bytes(frame)
 

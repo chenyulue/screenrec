@@ -13,6 +13,7 @@ from screenrec.capture import (
     FullscreenSource,
     RegionSource,
     WindowRect,
+    ensure_dpi_aware,
     find_window,
     list_windows,
 )
@@ -122,6 +123,7 @@ def _stop_on_enter(session: DefaultRecordingSession) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    ensure_dpi_aware()  # process-start setup: window rects need it on Windows
     parser = build_parser()
     if argv is None:
         argv = sys.argv[1:]
