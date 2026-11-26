@@ -5,6 +5,7 @@ import sys
 import threading
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -13,12 +14,13 @@ from screenrec.capture import (
     FullscreenSource,
     RegionSource,
     WindowRect,
+    WindowSource,
     ensure_dpi_aware,
     find_window,
     list_windows,
 )
-from screenrec.encoder import FfmpegFrameEncoder, NoopFrameEncoder
-from screenrec.preview import OpenCvPreview, resolve_placement
+from screenrec.encoder import FfmpegFrameEncoder, FrameEncoder, NoopFrameEncoder
+from screenrec.preview import OpenCvPreview, Preview, resolve_placement
 from screenrec.session import DefaultRecordingSession
 
 
@@ -122,6 +124,65 @@ def _stop_on_enter(session: DefaultRecordingSession) -> None:
             break
 
 
+@dataclass(frozen=True)
+class RunPlan:
+    """The assembled recording: everything ``main`` needs to run it."""
+
+    source: WindowSource
+    encoder: FrameEncoder
+    output: Path | None
+    preview: Preview | None
+    session: DefaultRecordingSession
+    preview_only: bool
+
+
+def assemble(args: argparse.Namespace) -> RunPlan:
+    """Build the recording plan from parsed arguments.
+
+    Owns the wiring: source selection, encoder and output path, preview and
+    session construction. Raises ``ValueError`` when a component cannot be
+    built (invalid region, no matching window, bad monitor); ``main`` renders
+    that as an error and exits.
+    """
+    if args.region is not None:
+        source = RegionSource(args.region, cursor_highlight=args.cursor_highlight)
+    elif args.window is not None:
+        match = find_window(args.window)
+        if match.warning:
+            print(f"warning: {match.warning}", file=sys.stderr)
+        source = RegionSource(match.rect, cursor_highlight=args.cursor_highlight)
+    else:
+        source = FullscreenSource(args.monitor, cursor_highlight=args.cursor_highlight)
+
+    preview_only = args.preview_only
+    preview_on = args.preview or preview_only
+
+    output: Path | None = None
+    if not preview_only:
+        output = Path(args.output) if args.output else default_output_path()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        encoder = FfmpegFrameEncoder(source.width, source.height, args.fps, str(output))
+    else:
+        encoder = NoopFrameEncoder()
+
+    preview = None
+    if preview_on:
+        position = resolve_placement(source.capture_rect(), source.monitors())
+        preview = OpenCvPreview(source.width, source.height, position)
+
+    session = DefaultRecordingSession(
+        source, encoder, args.fps, args.duration, preview=preview
+    )
+    return RunPlan(
+        source=source,
+        encoder=encoder,
+        output=output,
+        preview=preview,
+        session=session,
+        preview_only=preview_only,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ensure_dpi_aware()  # process-start setup: window rects need it on Windows
     parser = build_parser()
@@ -144,61 +205,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{title}\t{rect.left},{rect.top},{rect.width},{rect.height}")
         return 0
 
-    if args.region is not None:
-        try:
-            source = RegionSource(args.region, cursor_highlight=args.cursor_highlight)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-    elif args.window is not None:
-        try:
-            match = find_window(args.window)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        if match.warning:
-            print(f"warning: {match.warning}", file=sys.stderr)
-        source = RegionSource(match.rect, cursor_highlight=args.cursor_highlight)
-    else:
-        try:
-            source = FullscreenSource(args.monitor, cursor_highlight=args.cursor_highlight)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-    preview_on = args.preview or args.preview_only
-
-    output: Path | None = None
-    if not args.preview_only:
-        output = Path(args.output) if args.output else default_output_path()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        encoder = FfmpegFrameEncoder(source.width, source.height, args.fps, str(output))
-    else:
-        encoder = NoopFrameEncoder()
-
-    preview = None
-    if preview_on:
-        position = resolve_placement(source.capture_rect(), source.monitors())
-        preview = OpenCvPreview(source.width, source.height, position)
-    session = DefaultRecordingSession(
-        source, encoder, args.fps, args.duration, preview=preview
-    )
-
-    threading.Thread(target=_stop_on_enter, args=(session,), daemon=True).start()
-
-    session.start()
     try:
-        session.run()
+        plan = assemble(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    threading.Thread(target=_stop_on_enter, args=(plan.session,), daemon=True).start()
+
+    plan.session.start()
+    try:
+        plan.session.run()
     except KeyboardInterrupt:
         pass  # Ctrl-C is a graceful stop trigger
     finally:
-        outcome = session.stop()
+        outcome = plan.session.stop()
 
     if outcome.status == "fatal":
         print(f"error: {outcome.error}", file=sys.stderr)
-        if output is not None:
-            print(f"partial output retained: {output}", file=sys.stderr)
+        if plan.output is not None:
+            print(f"partial output retained: {plan.output}", file=sys.stderr)
         return 1
-    if output is not None:
-        print(output)
+    if plan.output is not None:
+        print(plan.output)
     return 0
