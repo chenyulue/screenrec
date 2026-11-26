@@ -17,6 +17,7 @@ from mss.base import MSS
 from mss.screenshot import ScreenShot
 
 from screenrec.capture.cursor import CursorAnnotator
+from screenrec.capture.cursor.platform import current_cursor, mss_composites_cursor
 
 
 def _open_mss(cursor_highlight: bool) -> MSS:
@@ -25,7 +26,7 @@ def _open_mss(cursor_highlight: bool) -> MSS:
     ``with_cursor`` is a Linux-only mss feature; passing it on other
     platforms raises a DeprecationWarning from mss.
     """
-    if sys.platform == "linux":
+    if mss_composites_cursor():
         return mss.mss(with_cursor=cursor_highlight)
     return mss.mss()
 
@@ -169,8 +170,9 @@ class FullscreenSource(_MssFrameSource):
         self._annotator = CursorAnnotator(
             self._monitor["width"],
             self._monitor["height"],
-            self._monitor["left"],
-            self._monitor["top"],
+            current_cursor,
+            left=self._monitor["left"],
+            top=self._monitor["top"],
             enabled=cursor_highlight,
         )
 
@@ -219,7 +221,12 @@ class RegionSource(_MssFrameSource):
             "height": rect.height,
         }
         self._annotator = CursorAnnotator(
-            rect.width, rect.height, rect.left, rect.top, enabled=cursor_highlight
+            rect.width,
+            rect.height,
+            current_cursor,
+            left=rect.left,
+            top=rect.top,
+            enabled=cursor_highlight,
         )
 
     def grab(self) -> bytes:
