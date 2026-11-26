@@ -10,11 +10,26 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
+from dataclasses import dataclass
+from typing import Literal
 
 from screenrec.audio import AudioSource, NoopAudioSource
 from screenrec.capture import WindowSource
 from screenrec.encoder import FrameEncoder
 from screenrec.preview import Preview
+
+
+@dataclass(frozen=True)
+class SessionOutcome:
+    """How a recording session ended (GLOSSARY: graceful stop, fatal stop).
+
+    ``status`` is the stop type; ``error`` carries the fatal error when the
+    stop was fatal. The encoding pipeline is finalized exactly when the
+    status is graceful — enforced by ``stop()``, not stored here.
+    """
+
+    status: Literal["graceful", "fatal"]
+    error: Exception | None = None
 
 
 class RecordingSession(ABC):
@@ -26,8 +41,9 @@ class RecordingSession(ABC):
         ...
 
     @abstractmethod
-    def stop(self) -> None:
-        """End the recording session and finalize the output."""
+    @abstractmethod
+    def stop(self) -> SessionOutcome:
+        """End the recording session and return how it ended."""
         ...
 
 
@@ -64,11 +80,7 @@ class DefaultRecordingSession(RecordingSession):
         self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
         self._timer: threading.Timer | None = None
         self._started = False
-
-    @property
-    def error(self) -> Exception | None:
-        """The fatal error that stopped the session, if any."""
-        return self._error
+        self._outcome: SessionOutcome | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -100,7 +112,7 @@ class DefaultRecordingSession(RecordingSession):
         """Ask the running session to stop; run() performs the graceful stop."""
         self._stop_event.set()
 
-    def run(self) -> None:
+    def run(self) -> SessionOutcome:
         """Block until stop is requested, then perform the graceful stop.
 
         With a preview, the main thread drives the display loop — OpenCV's
@@ -113,12 +125,21 @@ class DefaultRecordingSession(RecordingSession):
             self._preview_loop()
         else:
             self._stop_event.wait()
-        self.stop()
-    def stop(self) -> None:
-        """Stop gracefully: halt capture, drain queued frames, finalize output."""
+        return self.stop()
+
+    def stop(self) -> SessionOutcome:
+        """Stop the session and return how it ended.
+
+        Idempotent: the first stop computes the outcome and caches it;
+        later calls return the same one. A session cannot be restarted
+        after it has stopped.
+        """
         with self._lock:
+            if self._outcome is not None:
+                return self._outcome  # already stopped
             if not self._started:
-                return
+                # Never started: nothing to stop.
+                return SessionOutcome("graceful")
             self._started = False
             self._stop_event.set()
         if self._timer is not None:
@@ -128,19 +149,41 @@ class DefaultRecordingSession(RecordingSession):
         if self._preview is not None:
             self._preview.close()
         if self._error is not None:
-            # Fatal stop: the partial output is retained unfinalized (GLOSSARY).
-            return
-        # Graceful stop: drain whatever is still queued so the tail of the
-        # recording is not lost, then finalize normally.
-        while not self._queue.empty():
-            try:
-                self._encoder.push(self._queue.get_nowait())
-            except Exception as exc:
-                self._fail(exc)
-        try:
-            self._encoder.finalize()
-        except Exception as exc:
-            self._fail(exc)
+            # Fatal stop: abort the encoding pipeline so the partial output
+            # is flushed deterministically, and retain it unfinalized
+            # (GLOSSARY).
+            self._abort_encoder()
+            outcome = SessionOutcome("fatal", self._error)
+        else:
+            # Graceful stop: drain whatever is still queued so the tail of
+            # the recording is not lost, then finalize normally.
+            while not self._queue.empty():
+                try:
+                    self._encoder.push(self._queue.get_nowait())
+                except Exception as exc:
+                    self._fail(exc)
+            if self._error is not None:
+                # A drain failure flips the stop to fatal: abort instead of
+                # finalizing (the invariant the failure-policy tests assert).
+                self._abort_encoder()
+                outcome = SessionOutcome("fatal", self._error)
+            else:
+                try:
+                    self._encoder.finalize()
+                except Exception as exc:
+                    self._fail(exc)
+                outcome = (
+                    SessionOutcome("fatal", self._error)
+                    if self._error is not None
+                    else SessionOutcome("graceful")
+                )
+        self._outcome = outcome
+        return outcome
+
+    def _abort_encoder(self) -> None:
+        """Tear down the encoding pipeline on the fatal path. Best-effort
+        by contract: ``abort()`` does not raise."""
+        self._encoder.abort()
 
     def _fail(self, exc: Exception) -> None:
         if self._error is None:

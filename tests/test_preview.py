@@ -30,7 +30,7 @@ from screenrec.capture import (
 from screenrec.cli.main import build_parser
 from screenrec.encoder import FrameEncoder
 from screenrec.preview import PREVIEW_MARGIN, OpenCvPreview, Preview, resolve_placement
-from screenrec.session import DefaultRecordingSession
+from screenrec.session import DefaultRecordingSession, SessionOutcome
 
 # --------------------------------------------------------------------------- #
 # Parser tests
@@ -77,12 +77,16 @@ class _RecordingEncoder(FrameEncoder):
     def __init__(self) -> None:
         self.pushed: list[bytes] = []
         self.finalized = False
+        self.aborted = False
 
     def push(self, frame: bytes) -> None:
         self.pushed.append(frame)
 
     def finalize(self) -> None:
         self.finalized = True
+
+    def abort(self) -> None:
+        self.aborted = True
 
 
 class _FakePreview(Preview):
@@ -113,11 +117,14 @@ class _FakePreview(Preview):
         self.closed = True
 
 
-def _run_to_completion(session: DefaultRecordingSession, timeout: float = 10.0) -> None:
+def _run_to_completion(
+    session: DefaultRecordingSession, timeout: float = 10.0
+) -> SessionOutcome:
     t = threading.Thread(target=session.run, daemon=True)
     t.start()
     t.join(timeout=timeout)
     assert not t.is_alive(), f"session did not stop within {timeout}s"
+    return session.stop()
 
 
 def test_preview_q_triggers_graceful_stop() -> None:
@@ -126,9 +133,9 @@ def test_preview_q_triggers_graceful_stop() -> None:
     encoder = _RecordingEncoder()
     session = DefaultRecordingSession(_NeverFails(), encoder, fps=30, preview=preview)
 
-    _run_to_completion(session)
+    outcome = _run_to_completion(session)
 
-    assert session.error is None
+    assert outcome.status == "graceful"
     assert preview.quit_requested(), "preview should have requested quit"
     assert preview.closed, "preview window must be closed on stop"
     assert encoder.finalized, "graceful stop must finalize the encoder"
@@ -142,9 +149,9 @@ def test_no_preview_does_not_touch_display() -> None:
     )
 
     session.start()
-    session.run()
+    outcome = session.run()
 
-    assert session.error is None
+    assert outcome.status == "graceful"
     assert encoder.finalized
 
 

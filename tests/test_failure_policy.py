@@ -8,10 +8,11 @@ partial output retained, clear error.
 """
 
 import threading
+import time
 
 from screenrec.capture import WindowRect, WindowSource
 from screenrec.encoder import FrameEncoder
-from screenrec.session import DefaultRecordingSession
+from screenrec.session import DefaultRecordingSession, SessionOutcome
 
 
 class _FailingSource(WindowSource):
@@ -37,28 +38,38 @@ class _FailingSource(WindowSource):
 class _RecordingEncoder(FrameEncoder):
     """Records pushed frames; optionally raises after ``fail_after`` pushes."""
 
-    def __init__(self, fail_after: int | None = None) -> None:
+    def __init__(self, fail_after: int | None = None, delay: float = 0.0) -> None:
         self._fail_after = fail_after
+        self._delay = delay
         self._n = 0
         self.pushed: list[bytes] = []
         self.finalized = False
+        self.aborted = False
 
     def push(self, frame: bytes) -> None:
         self._n += 1
         if self._fail_after is not None and self._n > self._fail_after:
             raise RuntimeError("encoder died mid-session")
+        if self._delay:
+            time.sleep(self._delay)
         self.pushed.append(frame)
 
     def finalize(self) -> None:
         self.finalized = True
 
+    def abort(self) -> None:
+        self.aborted = True
 
-def _run_to_completion(session: DefaultRecordingSession, timeout: float = 10.0) -> None:
+
+def _run_to_completion(
+    session: DefaultRecordingSession, timeout: float = 10.0
+) -> SessionOutcome:
     """Start and run the session in a thread, wait for it to finish."""
     t = threading.Thread(target=session.run, daemon=True)
     t.start()
     t.join(timeout=timeout)
     assert not t.is_alive(), f"session did not stop within {timeout}s"
+    return session.stop()
 
 
 def test_window_disappearing_mid_session_triggers_fatal_stop() -> None:
@@ -66,13 +77,14 @@ def test_window_disappearing_mid_session_triggers_fatal_stop() -> None:
     encoder = _RecordingEncoder()
     session = DefaultRecordingSession(source, encoder, fps=30)
 
-    _run_to_completion(session)
+    outcome = _run_to_completion(session)
 
-    assert session.error is not None
-    assert "window disappeared" in str(session.error)
+    assert outcome.status == "fatal"
+    assert "window disappeared" in str(outcome.error)
     # Partial output retained: frames pushed before the failure are kept,
-    # but the encoder is not finalized (fatal stop, per GLOSSARY).
+    # but the encoder is aborted and not finalized (fatal stop, per GLOSSARY).
     assert encoder.pushed, "expected partial output (frames pushed before failure)"
+    assert encoder.aborted, "fatal stop must abort the encoder"
     assert not encoder.finalized, "fatal stop must not finalize the encoder"
 
 
@@ -81,11 +93,12 @@ def test_encoder_dying_mid_session_triggers_fatal_stop() -> None:
     encoder = _RecordingEncoder(fail_after=2)  # encoder dies after 2 pushes
     session = DefaultRecordingSession(source, encoder, fps=30)
 
-    _run_to_completion(session)
+    outcome = _run_to_completion(session)
 
-    assert session.error is not None
-    assert "encoder died" in str(session.error)
+    assert outcome.status == "fatal"
+    assert "encoder died" in str(outcome.error)
     assert encoder.pushed, "expected partial output (frames pushed before failure)"
+    assert encoder.aborted, "fatal stop must abort the encoder"
     assert not encoder.finalized, "fatal stop must not finalize the encoder"
 
 
@@ -106,7 +119,34 @@ def test_graceful_stop_finalizes_without_error() -> None:
     session = DefaultRecordingSession(_NeverFails(), encoder, fps=30, duration=0.1)
 
     session.start()
-    session.run()  # timer fires after 0.1s → graceful stop
+    outcome = session.run()  # timer fires after 0.1s → graceful stop
 
-    assert session.error is None
+    assert outcome.status == "graceful"
+    assert outcome.error is None
     assert encoder.finalized, "graceful stop must finalize the encoder"
+    assert not encoder.aborted, "graceful stop must not abort the encoder"
+
+
+def test_drain_failure_flips_stop_to_fatal() -> None:
+    """A frame that fails during the tail drain makes the stop fatal: the
+    encoder is aborted and never finalized (regression for the drain-leak,
+    where a drain failure fell through to finalize)."""
+    source = _FailingSource(grab_count=9999)
+    # The writer's first push is slow, so stop lands while frames are still
+    # queued; the drain then pushes the failing frame.
+    encoder = _RecordingEncoder(fail_after=1, delay=0.3)
+    session = DefaultRecordingSession(source, encoder, fps=30)
+
+    run_thread = threading.Thread(target=session.run, daemon=True)
+    run_thread.start()
+    time.sleep(0.15)  # let the capture fill the queue while the writer is slow
+    session.request_stop()
+    run_thread.join(timeout=15.0)
+    assert not run_thread.is_alive(), "session did not stop within 15s"
+
+    outcome = session.stop()
+
+    assert outcome.status == "fatal"
+    assert "encoder died" in str(outcome.error)
+    assert encoder.aborted, "drain failure must abort the encoder"
+    assert not encoder.finalized, "drain failure must not finalize the encoder"

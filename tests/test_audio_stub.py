@@ -11,7 +11,7 @@ import threading
 from screenrec.audio import AudioSource, NoopAudioSource
 from screenrec.capture import WindowRect, WindowSource
 from screenrec.encoder import FrameEncoder
-from screenrec.session import DefaultRecordingSession
+from screenrec.session import DefaultRecordingSession, SessionOutcome
 
 
 class _NeverFailsSource(WindowSource):
@@ -33,12 +33,16 @@ class _RecordingEncoder(FrameEncoder):
     def __init__(self) -> None:
         self.pushed: list[bytes] = []
         self.finalized = False
+        self.aborted = False
 
     def push(self, frame: bytes) -> None:
         self.pushed.append(frame)
 
     def finalize(self) -> None:
         self.finalized = True
+
+    def abort(self) -> None:
+        self.aborted = True
 
 
 class _CountingAudio(AudioSource):
@@ -52,12 +56,15 @@ class _CountingAudio(AudioSource):
         return None
 
 
-def _run_session(session: DefaultRecordingSession, timeout: float = 10.0) -> None:
+def _run_session(
+    session: DefaultRecordingSession, timeout: float = 10.0
+) -> SessionOutcome:
     """Start and run the session in a thread, wait for it to finish."""
     t = threading.Thread(target=session.run, daemon=True)
     t.start()
     t.join(timeout=timeout)
     assert not t.is_alive(), f"session did not stop within {timeout}s"
+    return session.stop()
 
 
 def test_noop_stub_produces_no_audio() -> None:
@@ -73,8 +80,8 @@ def test_session_with_stub_wired_in_completes_normally() -> None:
         duration=0.1,
         audio=NoopAudioSource(),
     )
-    _run_session(session)
-    assert session.error is None
+    outcome = _run_session(session)
+    assert outcome.status == "graceful"
     assert encoder.pushed, "expected frames to be recorded"
     assert encoder.finalized, "graceful stop must finalize the encoder"
 
@@ -83,8 +90,8 @@ def test_session_defaults_to_noop_audio_stub() -> None:
     """v1 callers that pass no audio source still get the no-op stub wired in."""
     encoder = _RecordingEncoder()
     session = DefaultRecordingSession(_NeverFailsSource(), encoder, fps=30, duration=0.1)
-    _run_session(session)
-    assert session.error is None
+    outcome = _run_session(session)
+    assert outcome.status == "graceful"
     assert encoder.finalized
 
 
@@ -96,6 +103,6 @@ def test_session_pulls_audio_samples_during_recording() -> None:
         _NeverFailsSource(), encoder, fps=30, duration=0.1, audio=audio
     )
     session.start()
-    session.run()
-    assert session.error is None
+    outcome = session.run()
+    assert outcome.status == "graceful"
     assert audio.samples_pulled > 0, "session must pull the audio data seam"

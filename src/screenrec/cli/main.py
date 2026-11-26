@@ -192,10 +192,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass  # Ctrl-C is a graceful stop trigger
     finally:
-        session.stop()
+        outcome = session.stop()
 
-    if session.error is not None:
-        print(f"error: {session.error}", file=sys.stderr)
+    if outcome.status == "fatal":
+        print(f"error: {outcome.error}", file=sys.stderr)
         if output is not None:
             print(f"partial output retained: {output}", file=sys.stderr)
         return 1

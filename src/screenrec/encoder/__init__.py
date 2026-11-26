@@ -26,6 +26,17 @@ class FrameEncoder(ABC):
     def finalize(self) -> None:
         """Finalize the output file so it is a complete, playable video."""
         ...
+    @abstractmethod
+    def abort(self) -> None:
+        """Stop without finalizing, retaining whatever was written.
+
+        Called on the fatal-stop path so the partial output is flushed
+        deterministically instead of relying on process-exit timing
+        (GLOSSARY: partial output). Implementations are best-effort and
+        must not raise.
+        """
+        ...
+
 
 
 class FfmpegFrameEncoder(FrameEncoder):
@@ -70,6 +81,16 @@ class FfmpegFrameEncoder(FrameEncoder):
             raise EncoderError(f"ffmpeg exited with code {code}: {detail}")
 
 
+    def abort(self) -> None:
+        """Close ffmpeg's stdin so it flushes and exits, retaining the
+        partial output (GLOSSARY)."""
+        if self._proc.stdin is not None:
+            with suppress(OSError):
+                self._proc.stdin.close()
+        with suppress(OSError):
+            self._proc.wait()
+
+
 class NoopFrameEncoder(FrameEncoder):
     """A FrameEncoder that discards every frame and finalizes trivially.
 
@@ -83,4 +104,8 @@ class NoopFrameEncoder(FrameEncoder):
 
     def finalize(self) -> None:
         """No output to finalize."""
+        return
+
+    def abort(self) -> None:
+        """Nothing to abort; no output was ever written."""
         return
